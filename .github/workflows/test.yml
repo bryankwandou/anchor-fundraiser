@@ -46,5 +46,17 @@ jobs:
           anchor keys sync
           anchor build
 
+      # Anchor 1.x spawns surfpool by default; run the Agave validator
+      # ourselves with the freshly built program preloaded instead.
+      - name: Start validator
+        run: |
+          PROGRAM_ID=$(solana address -k target/deploy/fundraiser-keypair.json)
+          solana-test-validator --reset --quiet             --bpf-program "$PROGRAM_ID" target/deploy/fundraiser.so &
+          for i in $(seq 1 60); do
+            solana cluster-version -u localhost >/dev/null 2>&1 && break
+            sleep 2
+          done
+          solana cluster-version -u localhost
+
       - name: Test (validator + bankrun, including milestones)
-        run: anchor test --skip-build
+        run: anchor test --skip-build --skip-deploy --skip-local-validator

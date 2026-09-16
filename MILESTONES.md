@@ -61,7 +61,7 @@ signer and the fundraiser PDA, and refuses four ways:
 | index outside the table | `InvalidMilestone` |
 | the mark has not been reached | `MilestoneNotReached` |
 | the mark was already announced | `MilestoneAlreadyAnnounced` |
-| the signer is not this campaign's maker | `ConstraintSeeds` / `ConstraintHasOne` |
+| the signer is not this campaign's maker | `ConstraintSeeds` (Anchor 2006) |
 
 The announcement is the part that must fire once, so it has its own flag byte
 rather than reusing the reached bits. `has_one = maker` plus seeds derived from
@@ -114,9 +114,18 @@ the fields and the instruction do not exist on the base program.
 1. **Happy path** — seven contributions of 10% set bits 0 and 1 and leave bit 2
    clear at 70%; the eighth crosses 75% in one call. Asserts the whole byte, and
    that announcing changes no reached bit.
-2. **Boundary** — one raw unit below 25% sets nothing; the single unit that
-   closes the gap sets bit 0 and only bit 0.
+2. **Boundary** — a campaign one raw unit below 25% has no bit set; a campaign
+   sitting exactly on 25% has bit 0 and only bit 0. (Two campaigns, because
+   the base `contribute` refuses anything under one whole token, so a single
+   raw unit cannot be added on its own.)
 3. **Abuse** — an unreached mark, an out-of-range index, a stranger, and a second
    announcement, each asserted against its named error, with the flag byte
    checked afterwards to prove the failures wrote nothing.
 4. **The latch** — documents the high-water-mark behaviour described above.
+
+Every contribution in the tests comes from a fresh wallet: the base program caps
+each contributor at 10% of the target *in total*, so one wallet can never walk a
+campaign past a milestone on its own.
+
+**Result:** `anchor test` on GitHub Actions (Anchor 1.1.2, Agave validator) —
+15 passing, 0 failing: the 11 original tests plus these 4.

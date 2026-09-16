@@ -98,7 +98,6 @@ describe("fundraiser — milestones", () => {
 
     const rent = await context.banksClient.getRent();
     const mintRent = Number(rent.minimumBalance(BigInt(MINT_SIZE)));
-    const contributorAta = getAssociatedTokenAddressSync(mint, payer.publicKey);
 
     await send(
       [
@@ -115,23 +114,12 @@ describe("fundraiser — milestones", () => {
           programId: TOKEN_PROGRAM_ID,
         }),
         createInitializeMint2Instruction(mint, DECIMALS, payer.publicKey, null),
-        createAssociatedTokenAccountInstruction(
-          payer.publicKey,
-          contributorAta,
-          payer.publicKey,
-          mint
-        ),
-        createMintToInstruction(mint, contributorAta, payer.publicKey, 10 * target),
       ],
       [mintKeypair]
     );
 
     const [fundraiser] = anchor.web3.PublicKey.findProgramAddressSync(
       [Buffer.from("fundraiser"), maker.publicKey.toBuffer()],
-      program.programId
-    );
-    const [contributorAccount] = anchor.web3.PublicKey.findProgramAddressSync(
-      [Buffer.from("contributor"), fundraiser.toBuffer(), payer.publicKey.toBuffer()],
       program.programId
     );
     const vault = getAssociatedTokenAddressSync(mint, fundraiser, true);
@@ -154,20 +142,43 @@ describe("fundraiser — milestones", () => {
       [maker]
     );
 
-    const contribute = (amount: number) =>
-      program.methods
-        .contribute(new anchor.BN(amount))
-        .accountsPartial({
-          contributor: payer.publicKey,
-          mintToRaise: mint,
-          fundraiser,
-          contributorAccount,
-          contributorAta,
-          vault,
-          tokenProgram: TOKEN_PROGRAM_ID,
-          systemProgram: anchor.web3.SystemProgram.programId,
-        })
-        .instruction();
+    // The base program caps each contributor at 10% of the target in total, not
+    // per call, so every contribution comes from a fresh, funded wallet.
+    const contribute = async (amount: number) => {
+      const who = anchor.web3.Keypair.generate();
+      const ata = getAssociatedTokenAddressSync(mint, who.publicKey);
+      const [contributorAccount] = anchor.web3.PublicKey.findProgramAddressSync(
+        [Buffer.from("contributor"), fundraiser.toBuffer(), who.publicKey.toBuffer()],
+        program.programId
+      );
+      await send([
+        anchor.web3.SystemProgram.transfer({
+          fromPubkey: payer.publicKey,
+          toPubkey: who.publicKey,
+          lamports: anchor.web3.LAMPORTS_PER_SOL / 10,
+        }),
+        createAssociatedTokenAccountInstruction(payer.publicKey, ata, who.publicKey, mint),
+        createMintToInstruction(mint, ata, payer.publicKey, amount),
+      ]);
+      await send(
+        [
+          await program.methods
+            .contribute(new anchor.BN(amount))
+            .accountsPartial({
+              contributor: who.publicKey,
+              mintToRaise: mint,
+              fundraiser,
+              contributorAccount,
+              contributorAta: ata,
+              vault,
+              tokenProgram: TOKEN_PROGRAM_ID,
+              systemProgram: anchor.web3.SystemProgram.programId,
+            })
+            .instruction(),
+        ],
+        [who]
+      );
+    };
 
     const acknowledge = (index: number, who: anchor.web3.PublicKey) =>
       program.methods
@@ -190,7 +201,7 @@ describe("fundraiser — milestones", () => {
     // Seven contributions of 10% each: 70% of the target, which is past the
     // 25% and 50% marks but short of 75%.
     for (let i = 0; i < 7; i++) {
-      await send([await c.contribute(CAP)]);
+      await c.contribute(CAP);
     }
 
     let s = await c.state();
@@ -201,7 +212,7 @@ describe("fundraiser — milestones", () => {
 
     // The trap: this one contribution takes the campaign from 70% to 80%, which
     // crosses 75% — one call, one new mark, and the two older bits untouched.
-    await send([await c.contribute(CAP)]);
+    await c.contribute(CAP);
     s = await c.state();
     assert.strictEqual(s.milestonesReached, 0b111, "all three marks recorded");
     assert.strictEqual(s.milestonesAnnounced, 0, "nothing announced yet");
@@ -217,18 +228,24 @@ describe("fundraiser — milestones", () => {
   it("fires at exactly the mark, and not one unit below it", async () => {
     const c = await openCampaign();
 
-    // 25% of 100 tokens is 25 tokens. Land one raw unit short of it.
-    await send([await c.contribute(CAP)]);
-    await send([await c.contribute(CAP)]);
-    await send([await c.contribute(5 * ONE_TOKEN - 1)]);
+    // 25% of 100 tokens is 25 tokens. Land one raw unit short of it. (The base
+    // program refuses contributions under one whole token, so the last unit
+    // has to ride along with a whole token.)
+    await c.contribute(CAP);
+    await c.contribute(CAP);
+    await c.contribute(5 * ONE_TOKEN - 1);
 
     let s = await c.state();
     assert.strictEqual(s.currentAmount.toNumber(), 25 * ONE_TOKEN - 1, "one unit short");
     assert.strictEqual(s.milestonesReached, 0, "one unit below the mark must not fire");
 
-    // The single unit that closes the gap.
-    await send([await c.contribute(ONE_TOKEN)]);
-    s = await c.state();
+    // A second campaign that lands on exactly 25 tokens.
+    const d = await openCampaign();
+    await d.contribute(CAP);
+    await d.contribute(CAP);
+    await d.contribute(5 * ONE_TOKEN);
+    s = await d.state();
+    assert.strictEqual(s.currentAmount.toNumber(), 25 * ONE_TOKEN, "exactly on the mark");
     assert.isTrue(bit(s.milestonesReached, 0), "exactly at the mark fires");
     assert.isFalse(bit(s.milestonesReached, 1), "and only that mark");
   });
@@ -236,9 +253,9 @@ describe("fundraiser — milestones", () => {
   // --- abuse ------------------------------------------------------------
   it("refuses a stranger, a double announcement and a mark that has not been reached", async () => {
     const c = await openCampaign();
-    await send([await c.contribute(CAP)]);
-    await send([await c.contribute(CAP)]);
-    await send([await c.contribute(5 * ONE_TOKEN)]); // exactly 25%
+    await c.contribute(CAP);
+    await c.contribute(CAP);
+    await c.contribute(5 * ONE_TOKEN); // exactly 25%
 
     // A milestone that exists but has not been reached.
     try {
@@ -270,7 +287,11 @@ describe("fundraiser — milestones", () => {
       await send([await c.acknowledge(0, stranger.publicKey)], [stranger]);
       assert.fail("a stranger must not be able to announce someone else's milestone");
     } catch (err) {
-      assertErrorIs(err, "ConstraintSeeds", "the fundraiser PDA is derived from the maker");
+      // Anchor checks `seeds` (derived from the signer) before `has_one`; either
+      // named constraint is a correct refusal, anything else is not.
+      const code = errorCodeOf(err).toLowerCase();
+      assert.oneOf(code, ["constraintseeds", "constrainthasone"],
+        `the fundraiser PDA is derived from the maker (got ${code})`);
     }
 
     // The maker announces once...
@@ -295,9 +316,9 @@ describe("fundraiser — milestones", () => {
   // --- the documented weakness -----------------------------------------
   it("latches: a refund lowers the total but does not clear a reached bit", async () => {
     const c = await openCampaign();
-    await send([await c.contribute(CAP)]);
-    await send([await c.contribute(CAP)]);
-    await send([await c.contribute(5 * ONE_TOKEN)]);
+    await c.contribute(CAP);
+    await c.contribute(CAP);
+    await c.contribute(5 * ONE_TOKEN);
 
     const s = await c.state();
     assert.isTrue(bit(s.milestonesReached, 0), "25% reached");

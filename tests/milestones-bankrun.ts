@@ -76,6 +76,9 @@ describe("fundraiser — milestones", () => {
       const code = parseInt(byNumber[1], 16);
       const known = (program.idl.errors ?? []).find((e: any) => e.code === code);
       if (known) return known.name;
+      // Anchor's own constraint errors are not in the program IDL.
+      const builtin: Record<number, string> = { 2001: "ConstraintHasOne", 2006: "ConstraintSeeds" };
+      if (builtin[code]) return builtin[code];
       return `custom error ${code}`;
     }
     return text.slice(0, 300);

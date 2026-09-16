@@ -43,8 +43,7 @@ for (index, percent) in MILESTONE_PERCENTS.iter().enumerate() {
 ```
 
 This is the trap the guide warns about. A contribution may be up to 10% of the
-target, and a refund followed by fresh contributions can move the total in jumps,
-so "one mark per contribution" is wrong. A campaign sitting at 70% that receives
+target, so the total moves in jumps and "one mark per contribution" is wrong. A campaign sitting at 70% that receives
 10% lands at 80% and crosses 75% in a single call; a campaign that somehow went
 from 0 to 80% would set all three bits in one pass.
 
@@ -121,7 +120,10 @@ the fields and the instruction do not exist on the base program.
 3. **Abuse** — an unreached mark, an out-of-range index, a stranger, and a second
    announcement, each asserted against its named error, with the flag byte
    checked afterwards to prove the failures wrote nothing.
-4. **The latch** — documents the high-water-mark behaviour described above.
+4. **The latch** — pins the state at 25% before a refund. It does not run the
+   refund itself: refunds only open after the deadline, which this file does
+   not fast-forward to. The latch holds because `refund` never touches
+   `milestones_reached`, which is visible in the diff.
 
 Every contribution in the tests comes from a fresh wallet: the base program caps
 each contributor at 10% of the target *in total*, so one wallet can never walk a
